@@ -309,7 +309,7 @@ class PDFExtractorApp:
 
         tk.Label(
             self.root,
-            text="PDF-Datei auswählen, Ziel festlegen, Starten drücken.",
+            text="Select a PDF file, set the destination, and press Start.",
             font=("Segoe UI", 10), bg=self.BG, fg="#555555",
         ).pack(pady=(0, 12))
 
@@ -318,7 +318,7 @@ class PDFExtractorApp:
         frm1.pack(fill="x", **pad)
 
         self.btn_pdf = tk.Button(
-            frm1, text="📂  PDF auswählen …",
+            frm1, text="📂  Select PDF file…",
             font=("Segoe UI", 10), width=22,
             command=self._pick_pdf,
         )
@@ -336,7 +336,7 @@ class PDFExtractorApp:
         frm2.pack(fill="x", **pad)
 
         self.btn_out = tk.Button(
-            frm2, text="💾  Ziel-Excel festlegen …",
+            frm2, text="💾  Set Excel destination …",
             font=("Segoe UI", 10), width=22,
             command=self._pick_out,
         )
@@ -355,14 +355,14 @@ class PDFExtractorApp:
         self.progress.pack(pady=(16, 2))
 
         self.lbl_status = tk.Label(
-            self.root, text="Bereit.",
+            self.root, text="Ready.",
             font=("Segoe UI", 9), bg=self.BG, fg="#555",
         )
         self.lbl_status.pack()
 
         # ── Starten-Button ───────────────────────────────────────────
         self.btn_start = tk.Button(
-            self.root, text="▶   Starten",
+            self.root, text="▶   Start",
             font=("Segoe UI", 13, "bold"),
             bg=self.ACCENT, fg=self.BTN_FG,
             activebackground="#005fa3", activeforeground=self.BTN_FG,
@@ -374,8 +374,8 @@ class PDFExtractorApp:
     # ── Datei-Dialoge ────────────────────────────────────────────────
     def _pick_pdf(self):
         path = filedialog.askopenfilename(
-            title="PDF-Datei auswählen",
-            filetypes=[("PDF-Dateien", "*.pdf"), ("Alle Dateien", "*.*")],
+            title="Select PDF file",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if path:
             self.pdf_path.set(path)
@@ -400,11 +400,11 @@ class PDFExtractorApp:
             initial_file = f"{base}_{today}.xlsx"
 
         path = filedialog.asksaveasfilename(
-            title="Excel-Datei speichern unter",
+            title="Save Excel file as",
             defaultextension=".xlsx",
             initialdir=initial_dir,
             initialfile=initial_file,
-            filetypes=[("Excel-Dateien", "*.xlsx"), ("Alle Dateien", "*.*")],
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
         )
         if path:
             self.out_path.set(path)
@@ -416,23 +416,23 @@ class PDFExtractorApp:
 
         if not pdf:
             messagebox.showwarning(
-                "Eingabe fehlt", "Bitte zuerst eine PDF-Datei auswählen.")
+                "Input missing", "Please select a PDF file first.")
             return
         if not os.path.isfile(pdf):
             messagebox.showerror(
-                "Datei nicht gefunden",
-                f"Die PDF-Datei wurde nicht gefunden:\n{pdf}")
+                "File not found",
+                f"The PDF file was not found:\n{pdf}")
             return
         if not out:
             messagebox.showwarning(
-                "Eingabe fehlt",
-                "Bitte einen Speicherort für die Excel-Datei festlegen.")
+                "Input missing",
+                "Please set a save location for the Excel file.")
             return
 
         # UI sperren
         self._set_ui_locked(True)
         self.progress["value"] = 0
-        self.lbl_status.config(text="Verarbeitung läuft …", fg="#555")
+        self.lbl_status.config(text="Processing …", fg="#555")
 
         # Verarbeitung im Hintergrund starten
         thread = threading.Thread(
@@ -457,31 +457,31 @@ class PDFExtractorApp:
     def _set_progress(self, pct, cur, total):
         self.progress["value"] = pct
         self.lbl_status.config(
-            text=f"Seite {cur} von {total} wird verarbeitet …")
+            text=f"Processing page {cur} of {total} …")
 
     def _on_success(self, row_count: int, out_path: str):
         self.progress["value"] = 100
         self.lbl_status.config(
-            text=f"✅  Fertig – {row_count} Datensätze extrahiert.",
+            text=f"✅  Done – {row_count} records extracted.",
             fg=self.SUCCESS)
         self._set_ui_locked(False)
         messagebox.showinfo(
-            "Fertig!",
-            f"Extraktion abgeschlossen.\n\n"
-            f"   Datensätze:  {row_count}\n"
-            f"   Datei:  {os.path.basename(out_path)}\n\n"
-            f"Gespeichert unter:\n{out_path}",
+            "Done!",
+            f"Extraction completed.\n\n"
+            f"   Records:  {row_count}\n"
+            f"   File:  {os.path.basename(out_path)}\n\n"
+            f"Saved to:\n{out_path}",
         )
 
     def _on_error(self, error_msg: str):
         self.progress["value"] = 0
-        self.lbl_status.config(text="❌  Fehler aufgetreten.", fg="#D83B01")
+        self.lbl_status.config(text="❌  An error occurred.", fg="#D83B01")
         self._set_ui_locked(False)
         messagebox.showerror(
-            "Fehler bei der Verarbeitung",
-            f"Es ist ein Fehler aufgetreten:\n\n{error_msg}\n\n"
-            f"Bitte prüfen Sie, ob die richtige PDF-Datei\n"
-            f"ausgewählt wurde und versuchen Sie es erneut.",
+            "Processing error",
+            f"An error occurred:\n\n{error_msg}\n\n"
+            f"Please verify that you selected a PDF file\n"
+            f"Please try again.",
         )
 
     # ── UI sperren / entsperren ──────────────────────────────────────
