@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 This script has an IQMS file as input (CESU-PDF) and
-extractsthe parameters in an excel file.
+extracts the parameters in an excel file.
 """
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -117,7 +117,7 @@ def format_multitag_newline(desc: str) -> str:
 
 
 def strip_noise(text: str) -> str:
-    text = re.split(r"\bRealiza:\b", text, flags=re.IGNORECASE)[0]
+    text = re.split(r"\bRealiza:", text, flags=re.IGNORECASE)[0]
     text = re.split(r"¿", text)[0]
     text = re.split(
         r"\bContinuidad\s+del\s+negocio\b", text, flags=re.IGNORECASE)[0]
@@ -189,6 +189,8 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
     Excel-Datei.  Gibt die Anzahl der extrahierten Zeilen zurück.
     """
     records = []
+    full_text_concat = ""
+
     with pdfplumber.open(pdf_path) as pdf:
         total_pages = len(pdf.pages)
         for pnum, page in enumerate(pdf.pages, start=1):
@@ -196,6 +198,8 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
                 progress_callback(pnum, total_pages)
 
             txt = page.extract_text() or ''
+            full_text_concat += txt + "\n"
+
             parts = re.split(r"(?=Descripción:\s*Parametro:)", txt)
             for part in parts:
                 if not ANCHOR_RE.match(part):
@@ -230,39 +234,83 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
                     'Valor obtenido': to_float(actual_str),
                 })
 
-    # ── Excel-Datei schreiben ────────────────────────────────────────
     _df = pd.DataFrame(records)
-    header_text = 'Flujo a la entrada del sistema PF/4100-INSF03'
 
+    # ── NEU: Fecha/Turno aus "Datos de registro"-Sektion ─────────────
+    fecha, turno = "", ""
+    datos_m = re.search(
+        r"Datos de registro.*?(?=Descripción|\Z)",
+        full_text_concat,
+        re.DOTALL | re.IGNORECASE
+    )
+    if datos_m:
+        section = datos_m.group(0)
+        fm = re.search(r"(\d{4}-\d{2}-\d{2})", section)
+        if fm:
+            fecha = fm.group(1)
+        tm = re.search(r"(\d+\w*\s+turno)", section, re.IGNORECASE)
+        if tm:
+            turno = tm.group(1)
+
+    header_row1 = f"Datos de registro - Fecha: {fecha}; Turno: *{turno}"
+
+    # ── NEU: Realiza global (einmalig, über Zeilenumbrüche) ──────────
+    realiza_row = ""
+    rm = re.search(
+        r"\bRealiza:\s*\*?\s*([\s\S]+?)(?=\n\n|\bDescripción:|\bContinuidad|¿|\Z)",
+        full_text_concat,
+        re.IGNORECASE
+    )
+    if rm:
+        tail = rm.group(1)
+        tail = re.split(r"¿", tail)[0]
+        tail = re.split(r"\bDescripción:", tail, flags=re.IGNORECASE)[0]
+        tail = re.split(
+            r"\bContinuidad\s+del\s+negocio\b", tail, flags=re.IGNORECASE)[0]
+        realiza_row = "Realiza: " + norm(tail)
+
+    # ── Excel-Datei schreiben ────────────────────────────────────────
     wb = Workbook()
     ws = wb.active
     ws.title = 'Extraccion'
 
-    ws['A1'] = header_text
+    # Row 1: Datos de registro - Fecha: …; Turno: *…
+    ws['A1'] = header_row1
     ws.merge_cells('A1:D1')
     ws['A1'].font = Font(bold=True)
     ws['A1'].alignment = Alignment(
         horizontal='center', vertical='center', wrap_text=True)
 
+    # Row 2: Realiza: …
+    ws['A2'] = realiza_row
+    ws.merge_cells('A2:D2')
+    ws['A2'].alignment = Alignment(
+        horizontal='center', vertical='center', wrap_text=True)
+
+    # Row 3: Spaltenüberschriften
     headers = ['Pagina', 'Descripción', 'Parametro:', 'Valor obtenido']
     for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=2, column=c, value=h)
+        cell = ws.cell(row=3, column=c, value=h)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
 
-    for r_idx, row in enumerate(_df.itertuples(index=False), start=3):
+    # Row 4+: Daten
+    for r_idx, row in enumerate(_df.itertuples(index=False), start=4):
         ws.cell(r_idx, 1, row[0])
         dcell = ws.cell(r_idx, 2, row[1])
         dcell.alignment = Alignment(wrap_text=True)
         ws.cell(r_idx, 3, row[2])
-        vcell = ws.cell(r_idx, 4, row[3])
-        vcell.number_format = '0.###'
+
+        val = row[3]
+        if val is not None:
+            vcell = ws.cell(r_idx, 4, f"{val:.2f}")
+            vcell.alignment = Alignment(horizontal='right')
 
     ws.column_dimensions['A'].width = 10
     ws.column_dimensions['B'].width = 55
     ws.column_dimensions['C'].width = 32
     ws.column_dimensions['D'].width = 18
-    ws.freeze_panes = 'A3'
+    ws.freeze_panes = 'A4'                                               
 
     wb.save(out_path)
     return len(_df)
@@ -272,7 +320,7 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
 #  GUI  (Tkinter)
 # ═══════════════════════════════════════════════════════════════════════
 class PDFExtractorApp:
-    """Einfache Oberfläche ."""
+    """Einfache Oberfläche."""
 
     BG       = "#f0f0f0"
     ACCENT   = "#0078D4"
@@ -284,7 +332,6 @@ class PDFExtractorApp:
         self.root.title("PDF → Excel  Extractor")
         self.root.resizable(False, False)
 
-        # ── Fenstergröße & Zentrierung ───────────────────────────────
         w, h = 660, 390
         sx = (self.root.winfo_screenwidth()  - w) // 2
         sy = (self.root.winfo_screenheight() - h) // 2
@@ -296,11 +343,9 @@ class PDFExtractorApp:
 
         self._build_ui()
 
-    # ── UI aufbauen ──────────────────────────────────────────────────
     def _build_ui(self):
         pad = dict(padx=18, pady=6)
 
-        # Titel
         tk.Label(
             self.root, text="PDF → Excel  Extractor",
             font=("Segoe UI", 18, "bold"),
@@ -313,7 +358,6 @@ class PDFExtractorApp:
             font=("Segoe UI", 10), bg=self.BG, fg="#555555",
         ).pack(pady=(0, 12))
 
-        # ── Eingabe-PDF ──────────────────────────────────────────────
         frm1 = tk.Frame(self.root, bg=self.BG)
         frm1.pack(fill="x", **pad)
 
@@ -331,7 +375,6 @@ class PDFExtractorApp:
         )
         self.lbl_pdf.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
-        # ── Ausgabe-Excel ────────────────────────────────────────────
         frm2 = tk.Frame(self.root, bg=self.BG)
         frm2.pack(fill="x", **pad)
 
@@ -349,7 +392,6 @@ class PDFExtractorApp:
         )
         self.lbl_out.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
-        # ── Fortschrittsbalken ───────────────────────────────────────
         self.progress = ttk.Progressbar(
             self.root, orient="horizontal", length=600, mode="determinate")
         self.progress.pack(pady=(16, 2))
@@ -360,7 +402,6 @@ class PDFExtractorApp:
         )
         self.lbl_status.pack()
 
-        # ── Starten-Button ───────────────────────────────────────────
         self.btn_start = tk.Button(
             self.root, text="▶   Start",
             font=("Segoe UI", 13, "bold"),
@@ -371,7 +412,6 @@ class PDFExtractorApp:
         )
         self.btn_start.pack(pady=(14, 10))
 
-    # ── Datei-Dialoge ────────────────────────────────────────────────
     def _pick_pdf(self):
         path = filedialog.askopenfilename(
             title="Select PDF file",
@@ -379,7 +419,6 @@ class PDFExtractorApp:
         )
         if path:
             self.pdf_path.set(path)
-            # automatisch einen Ausgabepfad vorschlagen
             base = os.path.splitext(os.path.basename(path))[0]
             today = datetime.date.today().isoformat()
             suggestion = os.path.join(
@@ -409,7 +448,6 @@ class PDFExtractorApp:
         if path:
             self.out_path.set(path)
 
-    # ── Validierung & Start ──────────────────────────────────────────
     def _on_start(self):
         pdf = self.pdf_path.get().strip()
         out = self.out_path.get().strip()
@@ -429,12 +467,10 @@ class PDFExtractorApp:
                 "Please set a save location for the Excel file.")
             return
 
-        # UI sperren
         self._set_ui_locked(True)
         self.progress["value"] = 0
         self.lbl_status.config(text="Processing …", fg="#555")
 
-        # Verarbeitung im Hintergrund starten
         thread = threading.Thread(
             target=self._run_extraction, args=(pdf, out), daemon=True)
         thread.start()
@@ -449,7 +485,6 @@ class PDFExtractorApp:
         except Exception as exc:
             self.root.after(0, self._on_error, str(exc))
 
-    # ── Callbacks (werden im Hauptthread aufgerufen) ─────────────────
     def _update_progress(self, current_page: int, total_pages: int):
         pct = int(current_page / total_pages * 100)
         self.root.after(0, self._set_progress, pct, current_page, total_pages)
@@ -484,7 +519,6 @@ class PDFExtractorApp:
             f"Please try again.",
         )
 
-    # ── UI sperren / entsperren ──────────────────────────────────────
     def _set_ui_locked(self, locked: bool):
         state = "disabled" if locked else "normal"
         self.btn_pdf.config(state=state)
