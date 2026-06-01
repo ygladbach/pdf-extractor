@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-This script has an IQMS file as input (CESU-PDF) and
-extracts the parameters in an excel file.
+PDF -> Excel  Extractor  v2  (Shopfloor-Edition)
+=================================================
+
+Features:
+  - Multiple PDF selection
+  - Auto-naming: CESU_AGUAPURI_<Fecha>_<Turno>.xlsx
+  - Overwrite warning before saving
+  - All PDFs -> individual .xlsx files in one output folder
 """
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -23,7 +29,7 @@ from openpyxl.styles import Alignment, Font
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  REGEX-MUSTER
+#  REGEX PATTERNS
 # ═══════════════════════════════════════════════════════════════════════
 ANCHOR_RE   = re.compile(r"Descripción:\s*Parametro:", re.IGNORECASE)
 DATO_RE     = re.compile(r"Dato\s*real:\s*\*", re.IGNORECASE)
@@ -33,7 +39,7 @@ TAG_FOR_NUM_RE = re.compile(
     r"PF/4100(?:-?INS)?-?[A-Z0-9]+(?:-[A-Z0-9]+)*", re.IGNORECASE)
 NUM_TOKEN_RE   = re.compile(r"[0-9]+(?:[\.,][0-9]+)?")
 
-UNITS = r"(?:L/min|[Bb]ar|mV|µS/cm|ppb|°C|%|m3/h|litros|L)"
+UNITS = r"(?:L/min|[Bb]ar|mV|\xb5S/cm|ppb|\xb0C|%|m3/h|litros|L)"
 RANGE_RE   = re.compile(
     rf"\b\d+(?:[\.,]\d+)?\s*{UNITS}?\s*a\s*\d+(?:[\.,]\d+)?\s*{UNITS}?\b",
     re.IGNORECASE)
@@ -42,13 +48,14 @@ MAX_RE     = re.compile(
 MIN_RE     = re.compile(
     rf"Min\.\s*\d+(?:[\.,]\d+)?\s*(?:{UNITS})?", re.IGNORECASE)
 COMP_RE    = re.compile(
-    rf"(?:≤|≥|>=|<=)\s*\d+(?:[\.,][0-9]+)?\s*(?:{UNITS})?", re.IGNORECASE)
+    rf"(?:\u2264|\u2265|>=|<=)\s*\d+(?:[\.,][0-9]+)?\s*(?:{UNITS})?",
+    re.IGNORECASE)
 ATLEAST_RE = re.compile(
     rf"Al\s+menos\s*\d+(?:[\.,][0-9]+)?\s*(?:{UNITS})?", re.IGNORECASE)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  HILFSFUNKTIONEN
+#  HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════
 def norm(s: str) -> str:
     s = s.replace('\u00a0', ' ')
@@ -118,7 +125,7 @@ def format_multitag_newline(desc: str) -> str:
 
 def strip_noise(text: str) -> str:
     text = re.split(r"\bRealiza:", text, flags=re.IGNORECASE)[0]
-    text = re.split(r"¿", text)[0]
+    text = re.split(r"\xbf", text)[0]
     text = re.split(
         r"\bContinuidad\s+del\s+negocio\b", text, flags=re.IGNORECASE)[0]
     return norm(text)
@@ -180,13 +187,90 @@ def split_desc_spec(merged: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  KERN-LOGIK:  PDF einlesen  →  Excel erzeugen
+#  METADATA EXTRACTION  (Fecha + Turno from PDF content)
+# ═══════════════════════════════════════════════════════════════════════
+TURNO_MAP = {
+    '1': 'T1', '2': 'T2', '3': 'T3',
+}
+
+
+def extract_pdf_metadata(pdf_path: str) -> tuple:
+    """
+    Quick-scan the first 5 pages of a PDF to extract Fecha and Turno.
+    Returns (fecha_str, turno_code) e.g. ("2026-04-16", "T3").
+    Falls back to ("", "") if not found.
+    """
+    fecha = ""
+    turno_code = ""
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            text = ""
+            for page in pdf.pages[:5]:
+                text += (page.extract_text() or "") + "\n"
+
+            # Look for "Datos de registro" section
+            datos_m = re.search(
+                r"Datos de registro.*?(?=Descripci\xf3n|\Z)",
+                text, re.DOTALL | re.IGNORECASE)
+            if datos_m:
+                section = datos_m.group(0)
+                # Extract date (yyyy-MM-dd)
+                fm = re.search(r"(\d{4}-\d{2}-\d{2})", section)
+                if fm:
+                    fecha = fm.group(1)
+                # Extract turno number
+                tm = re.search(r"(\d)\w*\s+turno", section, re.IGNORECASE)
+                if tm:
+                    turno_code = TURNO_MAP.get(tm.group(1), "")
+    except Exception:
+        pass
+    return fecha, turno_code
+
+
+def build_output_filename(pdf_path: str, out_dir: str,
+                          fecha: str, turno_code: str) -> str:
+    """
+    Build output filename: CESU_AGUAPURI_<Fecha>_<Turno>.xlsx
+    Parts CESU and AGUAPURI are extracted from the PDF filename
+    (first two hyphen-separated components).
+    Falls back to <original_name>_<today>.xlsx if metadata is missing.
+    """
+    basename = os.path.splitext(os.path.basename(pdf_path))[0]
+
+    # Try to extract first two hyphen-separated parts
+    parts = basename.split("-")
+    if len(parts) >= 2:
+        part1 = parts[0].strip()  # e.g. "CESU"
+        part2 = parts[1].strip()  # e.g. "AGUAPURI"
+    else:
+        part1 = basename
+        part2 = ""
+
+    # Build name components
+    components = []
+    if part1:
+        components.append(part1)
+    if part2:
+        components.append(part2)
+    if fecha:
+        components.append(fecha)
+    else:
+        components.append(datetime.date.today().isoformat())
+    if turno_code:
+        components.append(turno_code)
+
+    filename = "_".join(components) + ".xlsx"
+    return os.path.join(out_dir, filename)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CORE LOGIC:  PDF -> Excel
 # ═══════════════════════════════════════════════════════════════════════
 def process_pdf_to_excel(pdf_path: str, out_path: str,
                          progress_callback=None) -> int:
     """
-    Liest die PDF ein, extrahiert die Datensätze und schreibt eine
-    Excel-Datei.  Gibt die Anzahl der extrahierten Zeilen zurück.
+    Reads the PDF, extracts records, and writes an Excel file.
+    Returns the number of extracted rows.
     """
     records = []
     full_text_concat = ""
@@ -200,7 +284,7 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
             txt = page.extract_text() or ''
             full_text_concat += txt + "\n"
 
-            parts = re.split(r"(?=Descripción:\s*Parametro:)", txt)
+            parts = re.split(r"(?=Descripci\xf3n:\s*Parametro:)", txt)
             for part in parts:
                 if not ANCHOR_RE.match(part):
                     continue
@@ -229,17 +313,17 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
 
                 records.append({
                     'Pagina': pnum,
-                    'Descripción': desc,
+                    'Descripci\xf3n': desc,
                     'Parametro:': spec,
                     'Valor obtenido': to_float(actual_str),
                 })
 
     _df = pd.DataFrame(records)
 
-    # ── NEU: Fecha/Turno aus "Datos de registro"-Sektion ─────────────
+    # ── Fecha/Turno from "Datos de registro" section ─────────────────
     fecha, turno = "", ""
     datos_m = re.search(
-        r"Datos de registro.*?(?=Descripción|\Z)",
+        r"Datos de registro.*?(?=Descripci\xf3n|\Z)",
         full_text_concat,
         re.DOTALL | re.IGNORECASE
     )
@@ -254,47 +338,47 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
 
     header_row1 = f"Datos de registro - Fecha: {fecha}; Turno: *{turno}"
 
-    # ── NEU: Realiza global (einmalig, über Zeilenumbrüche) ──────────
+    # ── Realiza global ───────────────────────────────────────────────
     realiza_row = ""
     rm = re.search(
-        r"\bRealiza:\s*\*?\s*([\s\S]+?)(?=\n\n|\bDescripción:|\bContinuidad|¿|\Z)",
+        r"\bRealiza:\s*\*?\s*([\s\S]+?)(?=\n\n|\bDescripci\xf3n:|\bContinuidad|\xbf|\Z)",
         full_text_concat,
         re.IGNORECASE
     )
     if rm:
         tail = rm.group(1)
-        tail = re.split(r"¿", tail)[0]
-        tail = re.split(r"\bDescripción:", tail, flags=re.IGNORECASE)[0]
+        tail = re.split(r"\xbf", tail)[0]
+        tail = re.split(r"\bDescripci\xf3n:", tail, flags=re.IGNORECASE)[0]
         tail = re.split(
             r"\bContinuidad\s+del\s+negocio\b", tail, flags=re.IGNORECASE)[0]
         realiza_row = "Realiza: " + norm(tail)
 
-    # ── Excel-Datei schreiben ────────────────────────────────────────
+    # ── Write Excel ──────────────────────────────────────────────────
     wb = Workbook()
     ws = wb.active
     ws.title = 'Extraccion'
 
-    # Row 1: Datos de registro - Fecha: …; Turno: *…
+    # Row 1: header
     ws['A1'] = header_row1
     ws.merge_cells('A1:D1')
     ws['A1'].font = Font(bold=True)
     ws['A1'].alignment = Alignment(
         horizontal='center', vertical='center', wrap_text=True)
 
-    # Row 2: Realiza: …
+    # Row 2: Realiza
     ws['A2'] = realiza_row
     ws.merge_cells('A2:D2')
     ws['A2'].alignment = Alignment(
         horizontal='center', vertical='center', wrap_text=True)
 
-    # Row 3: Spaltenüberschriften
-    headers = ['Pagina', 'Descripción', 'Parametro:', 'Valor obtenido']
+    # Row 3: column headers
+    headers = ['Pagina', 'Descripci\xf3n', 'Parametro:', 'Valor obtenido']
     for c, h in enumerate(headers, start=1):
         cell = ws.cell(row=3, column=c, value=h)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
 
-    # Row 4+: Daten
+    # Row 4+: data
     for r_idx, row in enumerate(_df.itertuples(index=False), start=4):
         ws.cell(r_idx, 1, row[0])
         dcell = ws.cell(r_idx, 2, row[1])
@@ -310,7 +394,7 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
     ws.column_dimensions['B'].width = 55
     ws.column_dimensions['C'].width = 32
     ws.column_dimensions['D'].width = 18
-    ws.freeze_panes = 'A4'                                               
+    ws.freeze_panes = 'A4'
 
     wb.save(out_path)
     return len(_df)
@@ -320,7 +404,7 @@ def process_pdf_to_excel(pdf_path: str, out_path: str,
 #  GUI  (Tkinter)
 # ═══════════════════════════════════════════════════════════════════════
 class PDFExtractorApp:
-    """Einfache Oberfläche."""
+    """Simple shopfloor interface – multi-file edition."""
 
     BG       = "#f0f0f0"
     ACCENT   = "#0078D4"
@@ -329,69 +413,75 @@ class PDFExtractorApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("PDF → Excel  Extractor")
+        self.root.title("PDF \u2192 Excel  Extractor")
         self.root.resizable(False, False)
 
-        w, h = 660, 390
+        w, h = 660, 410
         sx = (self.root.winfo_screenwidth()  - w) // 2
         sy = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{sx}+{sy}")
         self.root.configure(bg=self.BG)
 
-        self.pdf_path = tk.StringVar(value="")
-        self.out_path = tk.StringVar(value="")
+        self.pdf_paths: list = []
+        self.pdf_display = tk.StringVar(value="")
+        self.out_dir = tk.StringVar(value="")
 
         self._build_ui()
 
+    # ── Build UI ─────────────────────────────────────────────────────
     def _build_ui(self):
         pad = dict(padx=18, pady=6)
 
+        # Title
         tk.Label(
-            self.root, text="PDF → Excel  Extractor",
+            self.root, text="PDF \u2192 Excel  Extractor",
             font=("Segoe UI", 18, "bold"),
             bg=self.BG, fg=self.ACCENT,
         ).pack(pady=(18, 4))
 
         tk.Label(
             self.root,
-            text="Select a PDF file, set the destination, and press Start.",
+            text="Select one or more PDF files, choose the output folder, and press Start.",
             font=("Segoe UI", 10), bg=self.BG, fg="#555555",
         ).pack(pady=(0, 12))
 
+        # ── PDF selection (multiple) ─────────────────────────────────
         frm1 = tk.Frame(self.root, bg=self.BG)
         frm1.pack(fill="x", **pad)
 
         self.btn_pdf = tk.Button(
-            frm1, text="📂  Select PDF file…",
+            frm1, text="\U0001f4c2  Select PDF files\u2026",
             font=("Segoe UI", 10), width=22,
-            command=self._pick_pdf,
+            command=self._pick_pdfs,
         )
         self.btn_pdf.pack(side="left")
 
         self.lbl_pdf = tk.Label(
-            frm1, textvariable=self.pdf_path,
+            frm1, textvariable=self.pdf_display,
             font=("Segoe UI", 9), bg=self.BG, fg="#333",
             anchor="w", wraplength=400,
         )
         self.lbl_pdf.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
+        # ── Output folder ────────────────────────────────────────────
         frm2 = tk.Frame(self.root, bg=self.BG)
         frm2.pack(fill="x", **pad)
 
         self.btn_out = tk.Button(
-            frm2, text="💾  Set Excel destination …",
+            frm2, text="\U0001f4c1  Output folder\u2026",
             font=("Segoe UI", 10), width=22,
-            command=self._pick_out,
+            command=self._pick_outdir,
         )
         self.btn_out.pack(side="left")
 
         self.lbl_out = tk.Label(
-            frm2, textvariable=self.out_path,
+            frm2, textvariable=self.out_dir,
             font=("Segoe UI", 9), bg=self.BG, fg="#333",
             anchor="w", wraplength=400,
         )
         self.lbl_out.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
+        # ── Progress ─────────────────────────────────────────────────
         self.progress = ttk.Progressbar(
             self.root, orient="horizontal", length=600, mode="determinate")
         self.progress.pack(pady=(16, 2))
@@ -402,8 +492,9 @@ class PDFExtractorApp:
         )
         self.lbl_status.pack()
 
+        # ── Start button ─────────────────────────────────────────────
         self.btn_start = tk.Button(
-            self.root, text="▶   Start",
+            self.root, text="\u25b6   Start",
             font=("Segoe UI", 13, "bold"),
             bg=self.ACCENT, fg=self.BTN_FG,
             activebackground="#005fa3", activeforeground=self.BTN_FG,
@@ -412,113 +503,197 @@ class PDFExtractorApp:
         )
         self.btn_start.pack(pady=(14, 10))
 
-    def _pick_pdf(self):
-        path = filedialog.askopenfilename(
-            title="Select PDF file",
+    # ── File / folder dialogs ────────────────────────────────────────
+    def _pick_pdfs(self):
+        paths = filedialog.askopenfilenames(
+            title="Select PDF files",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
-        if path:
-            self.pdf_path.set(path)
-            base = os.path.splitext(os.path.basename(path))[0]
-            today = datetime.date.today().isoformat()
-            suggestion = os.path.join(
-                os.path.dirname(path),
-                f"{base}_{today}.xlsx",
-            )
-            if not self.out_path.get():
-                self.out_path.set(suggestion)
+        if paths:
+            self.pdf_paths = list(paths)
+            n = len(self.pdf_paths)
+            if n == 1:
+                self.pdf_display.set(os.path.basename(self.pdf_paths[0]))
+            else:
+                self.pdf_display.set(f"{n} files selected")
 
-    def _pick_out(self):
-        initial_dir  = ""
-        initial_file = ""
-        if self.pdf_path.get():
-            initial_dir = os.path.dirname(self.pdf_path.get())
-            base = os.path.splitext(
-                os.path.basename(self.pdf_path.get()))[0]
-            today = datetime.date.today().isoformat()
-            initial_file = f"{base}_{today}.xlsx"
+            # Auto-suggest output folder (same as first PDF)
+            if not self.out_dir.get():
+                self.out_dir.set(os.path.dirname(self.pdf_paths[0]))
 
-        path = filedialog.asksaveasfilename(
-            title="Save Excel file as",
-            defaultextension=".xlsx",
-            initialdir=initial_dir,
-            initialfile=initial_file,
-            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+    def _pick_outdir(self):
+        initial = ""
+        if self.pdf_paths:
+            initial = os.path.dirname(self.pdf_paths[0])
+
+        folder = filedialog.askdirectory(
+            title="Select output folder",
+            initialdir=initial,
         )
-        if path:
-            self.out_path.set(path)
+        if folder:
+            self.out_dir.set(folder)
 
+    # ── Validation & start ───────────────────────────────────────────
     def _on_start(self):
-        pdf = self.pdf_path.get().strip()
-        out = self.out_path.get().strip()
-
-        if not pdf:
+        if not self.pdf_paths:
             messagebox.showwarning(
-                "Input missing", "Please select a PDF file first.")
+                "Input missing", "Please select one or more PDF files first.")
             return
-        if not os.path.isfile(pdf):
+
+        missing = [p for p in self.pdf_paths if not os.path.isfile(p)]
+        if missing:
+            names = "\n".join(os.path.basename(p) for p in missing[:5])
             messagebox.showerror(
-                "File not found",
-                f"The PDF file was not found:\n{pdf}")
+                "Files not found",
+                f"The following PDF files were not found:\n\n{names}")
             return
+
+        out = self.out_dir.get().strip()
         if not out:
             messagebox.showwarning(
-                "Input missing",
-                "Please set a save location for the Excel file.")
+                "Input missing", "Please select an output folder.")
+            return
+        if not os.path.isdir(out):
+            messagebox.showerror(
+                "Folder not found",
+                f"The output folder was not found:\n{out}")
             return
 
+        # ── Build job list with metadata & overwrite check ───────────
+        self.lbl_status.config(text="Reading PDF metadata\u2026", fg="#555")
+        self.root.update_idletasks()
+
+        jobs = []  # list of (pdf_path, out_path)
+        skipped = []
+
+        for pdf_path in self.pdf_paths:
+            fecha, turno_code = extract_pdf_metadata(pdf_path)
+            out_path = build_output_filename(pdf_path, out, fecha, turno_code)
+
+            if os.path.exists(out_path):
+                fname = os.path.basename(out_path)
+                overwrite = messagebox.askyesno(
+                    "File already exists",
+                    f"The file already exists:\n\n"
+                    f"   {fname}\n\n"
+                    f"Do you want to overwrite it?")
+                if not overwrite:
+                    skipped.append(fname)
+                    continue
+
+            jobs.append((pdf_path, out_path))
+
+        if not jobs:
+            if skipped:
+                messagebox.showinfo(
+                    "Nothing to do",
+                    f"All files were skipped (not overwritten):\n\n"
+                    + "\n".join(skipped))
+            self.lbl_status.config(text="Ready.", fg="#555")
+            return
+
+        # ── Lock UI and start processing ─────────────────────────────
         self._set_ui_locked(True)
         self.progress["value"] = 0
-        self.lbl_status.config(text="Processing …", fg="#555")
+        self.lbl_status.config(text="Processing\u2026", fg="#555")
 
         thread = threading.Thread(
-            target=self._run_extraction, args=(pdf, out), daemon=True)
+            target=self._run_batch, args=(jobs, skipped), daemon=True)
         thread.start()
 
-    def _run_extraction(self, pdf_path: str, out_path: str):
-        try:
-            row_count = process_pdf_to_excel(
-                pdf_path, out_path,
-                progress_callback=self._update_progress,
-            )
-            self.root.after(0, self._on_success, row_count, out_path)
-        except Exception as exc:
-            self.root.after(0, self._on_error, str(exc))
+    def _run_batch(self, jobs: list, skipped: list):
+        total_files = len(jobs)
+        results = []  # (filename, row_count)
+        errors = []   # (filename, error_msg)
 
-    def _update_progress(self, current_page: int, total_pages: int):
-        pct = int(current_page / total_pages * 100)
-        self.root.after(0, self._set_progress, pct, current_page, total_pages)
+        for file_idx, (pdf_path, out_path) in enumerate(jobs, start=1):
+            fname = os.path.basename(out_path)
+            try:
+                def progress_cb(cur_page, total_pages,
+                                _fi=file_idx, _tf=total_files):
+                    self.root.after(
+                        0, self._set_batch_progress,
+                        _fi, _tf, cur_page, total_pages)
 
-    def _set_progress(self, pct, cur, total):
-        self.progress["value"] = pct
+                row_count = process_pdf_to_excel(
+                    pdf_path, out_path,
+                    progress_callback=progress_cb)
+                results.append((fname, row_count))
+
+            except Exception as exc:
+                errors.append((fname, str(exc)))
+
+        self.root.after(0, self._on_batch_done, results, errors, skipped)
+
+    # ── Progress & callbacks ─────────────────────────────────────────
+    def _set_batch_progress(self, file_idx, total_files,
+                            cur_page, total_pages):
+        # Overall progress across all files
+        file_fraction = (file_idx - 1) / total_files
+        page_fraction = cur_page / total_pages / total_files
+        pct = int((file_fraction + page_fraction) * 100)
+        self.progress["value"] = min(pct, 100)
         self.lbl_status.config(
-            text=f"Processing page {cur} of {total} …")
+            text=f"File {file_idx} of {total_files} \u2013 "
+                 f"page {cur_page} of {total_pages}\u2026")
 
-    def _on_success(self, row_count: int, out_path: str):
+    def _on_batch_done(self, results: list, errors: list, skipped: list):
         self.progress["value"] = 100
-        self.lbl_status.config(
-            text=f"✅  Done – {row_count} records extracted.",
-            fg=self.SUCCESS)
         self._set_ui_locked(False)
-        messagebox.showinfo(
-            "Done!",
-            f"Extraction completed.\n\n"
-            f"   Records:  {row_count}\n"
-            f"   File:  {os.path.basename(out_path)}\n\n"
-            f"Saved to:\n{out_path}",
-        )
+
+        # Build summary
+        total_records = sum(rc for _, rc in results)
+        parts = []
+
+        if results:
+            parts.append(f"Successfully created {len(results)} file(s) "
+                         f"with {total_records} total records:\n")
+            for fname, rc in results:
+                parts.append(f"   \u2705  {fname}  ({rc} records)")
+
+        if skipped:
+            parts.append(f"\nSkipped (not overwritten): {len(skipped)}")
+            for fname in skipped:
+                parts.append(f"   \u23ed  {fname}")
+
+        if errors:
+            parts.append(f"\nErrors: {len(errors)}")
+            for fname, err in errors:
+                parts.append(f"   \u274c  {fname}: {err}")
+
+        summary = "\n".join(parts)
+
+        if errors and not results:
+            # All failed
+            self.lbl_status.config(
+                text="\u274c  All files failed.", fg="#D83B01")
+            messagebox.showerror("Processing error", summary)
+        elif errors:
+            # Partial success
+            self.lbl_status.config(
+                text=f"\u26a0  {len(results)} OK, {len(errors)} failed.",
+                fg="#D83B01")
+            messagebox.showwarning("Partially completed", summary)
+        else:
+            # All succeeded
+            self.lbl_status.config(
+                text=f"\u2705  Done \u2013 {len(results)} file(s), "
+                     f"{total_records} records extracted.",
+                fg=self.SUCCESS)
+            messagebox.showinfo("Done!", summary)
 
     def _on_error(self, error_msg: str):
         self.progress["value"] = 0
-        self.lbl_status.config(text="❌  An error occurred.", fg="#D83B01")
+        self.lbl_status.config(
+            text="\u274c  An error occurred.", fg="#D83B01")
         self._set_ui_locked(False)
         messagebox.showerror(
             "Processing error",
             f"An error occurred:\n\n{error_msg}\n\n"
-            f"Please verify that you selected a PDF file\n"
-            f"Please try again.",
-        )
+            f"Please verify that you selected a PDF file.\n"
+            f"Please try again.")
 
+    # ── Lock / unlock UI ─────────────────────────────────────────────
     def _set_ui_locked(self, locked: bool):
         state = "disabled" if locked else "normal"
         self.btn_pdf.config(state=state)
